@@ -1,0 +1,249 @@
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.response import Response
+from django.contrib.auth.models import User
+from django.conf import settings
+from django.utils import timezone
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.http import HttpResponse
+from django.db.models import Sum
+from io import BytesIO
+import qrcode
+import random
+from .models import (
+    VerificationCode, ParticipantProfile, Skill, Event,
+    Participation, ParticipantSkill
+)
+from .tasks import send_telegram_code
+
+def add_cors_headers(response):
+    response['Access-Control-Allow-Origin'] = '*'
+    response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, OPTIONS'
+    response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    return response
+
+@api_view(['GET'])
+def health_check(request):
+    return add_cors_headers(Response({'status': 'ok', 'message': 'Birge API работает'}))
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def send_verification_code(request):
+    phone = request.data.get('phone')
+    if not phone:
+        return add_cors_headers(Response({'error': 'Телефон обязателен'}, status=400))
+    # Проверяем, есть ли пользователь с таким телефоном
+    try:
+        profile = ParticipantProfile.objects.get(phone=phone)
+        chat_id = profile.telegram_chat_id
+    except ParticipantProfile.DoesNotExist:
+        # Если профиля нет, мы его создадим позже при верификации кода
+        chat_id = None
+
+    code = f"{random.randint(100000, 999999)}"
+    VerificationCode.objects.create(phone=phone, code=code)
+    print(f"📧 Код для {phone}: {code}")
+
+    # Если есть chat_id, отправляем в Telegram
+    if chat_id:
+        send_telegram_code.delay(chat_id, code)
+
+    return add_cors_headers(Response({'message': 'Код отправлен (в Telegram, если привязан)'}))
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def verify_code(request):
+    phone = request.data.get('phone')
+    code = request.data.get('code')
+    try:
+        verification = VerificationCode.objects.filter(
+            phone=phone, code=code, is_used=False
+        ).latest('created_at')
+    except VerificationCode.DoesNotExist:
+        return add_cors_headers(Response({'error': 'Неверный или просроченный код'}, status=400))
+    if verification.is_expired():
+        return add_cors_headers(Response({'error': 'Код истёк'}, status=400))
+    verification.is_used = True
+    verification.save()
+
+    # Создаём или находим пользователя
+    user, created = User.objects.get_or_create(username=phone, defaults={'email': f'{phone}@temp.com'})
+    if created:
+        user.set_unusable_password()
+        user.save()
+    profile, _ = ParticipantProfile.objects.get_or_create(user=user, defaults={'phone': phone})
+    # Если пришёл telegram_chat_id, обновляем (если пользователь привязал бота)
+    tg_chat_id = request.data.get('telegram_chat_id')
+    if tg_chat_id:
+        profile.telegram_chat_id = tg_chat_id
+        profile.save()
+
+    refresh = RefreshToken.for_user(user)
+    return add_cors_headers(Response({
+        'success': True,
+        'access_token': str(refresh.access_token),
+        'refresh_token': str(refresh),
+    }))
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_profile(request):
+    profile = ParticipantProfile.objects.get(user=request.user)
+    total_hours = Participation.objects.filter(participant=profile, is_verified=True).aggregate(total=Sum('hours_claimed'))['total'] or 0
+    skills = ParticipantSkill.objects.filter(participant=profile, level__gt=0).select_related('skill')
+    skills_data = [{'name': s.skill.name, 'level': s.level} for s in skills]
+    events = Participation.objects.filter(participant=profile, is_verified=True).select_related('event')[:10]
+    events_data = [{'title': p.event.title, 'hours': p.hours_claimed, 'date': p.verified_at} for p in events]
+    return add_cors_headers(Response({
+        'phone': profile.phone,
+        'first_name': request.user.first_name,
+        'last_name': request.user.last_name,
+        'user_type': profile.user_type,
+        'institution': profile.institution,
+        'group_name': profile.group_name,
+        'total_hours': total_hours,
+        'skills': skills_data,
+        'events': events_data,
+        'is_staff': request.user.is_staff,
+    }))
+
+@api_view(['PUT'])
+@permission_classes([IsAuthenticated])
+def update_profile(request):
+    user = request.user
+    profile = ParticipantProfile.objects.get(user=user)
+    data = request.data
+    if 'first_name' in data:
+        user.first_name = data['first_name']
+    if 'last_name' in data:
+        user.last_name = data['last_name']
+    user.save()
+    if 'user_type' in data:
+        profile.user_type = data['user_type']
+    if 'institution' in data:
+        profile.institution = data['institution']
+    if 'group_name' in data:
+        profile.group_name = data['group_name']
+    # Обновление chat_id, если пришло
+    if 'telegram_chat_id' in data:
+        profile.telegram_chat_id = data['telegram_chat_id']
+    profile.save()
+    return add_cors_headers(Response({'message': 'Профиль обновлён'}))
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def skill_list(request):
+    skills = Skill.objects.all()
+    return add_cors_headers(Response([{'id': s.id, 'name': s.name, 'category': s.category} for s in skills]))
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_event(request):
+    if not request.user.is_staff:
+        return add_cors_headers(Response({'error': 'Доступ только для организаторов'}, status=403))
+    data = request.data
+    event = Event.objects.create(
+        title=data['title'],
+        description=data.get('description', ''),
+        date_start=data['date_start'],
+        date_end=data['date_end'],
+        max_hours=data['max_hours'],
+        code=data.get('code', ''),
+        status='active',
+        organizer=request.user
+    )
+    if 'skill_ids' in data:
+        event.skills.set(data['skill_ids'])
+    return add_cors_headers(Response({'message': 'Мероприятие создано', 'event_id': event.id, 'code': event.code}))
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def my_events(request):
+    if not request.user.is_staff:
+        return add_cors_headers(Response({'error': 'Доступ только для организаторов'}, status=403))
+    events = Event.objects.filter(organizer=request.user)
+    data = [{
+        'id': e.id,
+        'title': e.title,
+        'code': e.code,
+        'date_start': e.date_start,
+        'date_end': e.date_end,
+        'max_hours': e.max_hours,
+        'status': e.status,
+        'skills': [s.name for s in e.skills.all()]
+    } for e in events]
+    return add_cors_headers(Response(data))
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def event_qr(request, code):
+    try:
+        event = Event.objects.get(code=code, status='active')
+    except Event.DoesNotExist:
+        return add_cors_headers(Response({'error': 'Мероприятие не найдено'}, status=404))
+    if request.user != event.organizer and not request.user.is_superuser:
+        return add_cors_headers(Response({'error': 'Доступ запрещён'}, status=403))
+    img = qrcode.make(event.code)
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    response = HttpResponse(buffer.getvalue(), content_type="image/png")
+    response['Access-Control-Allow-Origin'] = '*'
+    return response
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def event_participants(request, event_id):
+    try:
+        event = Event.objects.get(id=event_id, organizer=request.user)
+    except Event.DoesNotExist:
+        return add_cors_headers(Response({'error': 'Мероприятие не найдено или доступ запрещён'}, status=404))
+    participations = Participation.objects.filter(event=event).select_related('participant__user')
+    data = [{
+        'id': p.id,
+        'participant_name': f"{p.participant.user.first_name} {p.participant.user.last_name}",
+        'user_type': p.participant.user_type,
+        'institution': p.participant.institution,
+        'group': p.participant.group_name,
+        'hours': p.hours_claimed,
+        'verified': p.is_verified,
+        'registered_at': p.registered_at
+    } for p in participations]
+    return add_cors_headers(Response(data))
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def verify_participation(request, participation_id):
+    try:
+        participation = Participation.objects.get(id=participation_id)
+        if participation.event.organizer != request.user:
+            return add_cors_headers(Response({'error': 'Доступ запрещён'}, status=403))
+    except Participation.DoesNotExist:
+        return add_cors_headers(Response({'error': 'Участие не найдено'}, status=404))
+    participation.is_verified = True
+    participation.verified_at = timezone.now()
+    participation.verified_by = request.user
+    participation.save()
+    participant = participation.participant
+    for skill in participation.event.skills.all():
+        ps, created = ParticipantSkill.objects.get_or_create(participant=participant, skill=skill)
+        count = Participation.objects.filter(participant=participant, event__skills=skill, is_verified=True).count()
+        ps.level = min(count, 3)
+        ps.save()
+    return add_cors_headers(Response({'message': 'Часы подтверждены'}))
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def register_event_by_code(request):
+    code = request.data.get('code')
+    hours = request.data.get('hours', 0)
+    try:
+        event = Event.objects.get(code=code, status='active')
+    except Event.DoesNotExist:
+        return add_cors_headers(Response({'error': 'Мероприятие не найдено'}, status=404))
+    profile = ParticipantProfile.objects.get(user=request.user)
+    if hours > event.max_hours:
+        return add_cors_headers(Response({'error': f'Максимум {event.max_hours} часов'}, status=400))
+    participation, created = Participation.objects.get_or_create(participant=profile, event=event, defaults={'hours_claimed': hours})
+    if not created:
+        return add_cors_headers(Response({'error': 'Вы уже зарегистрированы'}, status=400))
+    return add_cors_headers(Response({'message': 'Регистрация успешна. Ожидайте подтверждения.'}))
