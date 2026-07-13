@@ -247,3 +247,20 @@ def register_event_by_code(request):
     if not created:
         return add_cors_headers(Response({'error': 'Вы уже зарегистрированы'}, status=400))
     return add_cors_headers(Response({'message': 'Регистрация успешна. Ожидайте подтверждения.'}))
+import json
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from .models import ParticipantProfile
+from .telegram_bot import send_telegram_message, handle_telegram_message
+
+@csrf_exempt
+def telegram_webhook(request):
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body)
+            handle_telegram_message(data)
+            return JsonResponse({'status': 'ok'})
+        except Exception as e:
+            print(f"Webhook error: {e}")
+            return JsonResponse({'status': 'error'}, status=500)
+    return JsonResponse({'status': 'method not allowed'}, status=405)
