@@ -1,3 +1,4 @@
+import re
 import requests
 from django.conf import settings
 from .models import ParticipantProfile
@@ -5,7 +6,6 @@ from .models import ParticipantProfile
 TELEGRAM_TOKEN = settings.TELEGRAM_BOT_TOKEN
 
 def send_telegram_message(chat_id, text):
-    """Отправляет сообщение в Telegram"""
     if not chat_id:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -17,7 +17,6 @@ def send_telegram_message(chat_id, text):
         print(f"❌ Ошибка отправки в Telegram: {e}")
 
 def handle_telegram_message(data):
-    """Обрабатывает входящее сообщение от Telegram"""
     message = data.get('message')
     if not message:
         return
@@ -28,20 +27,35 @@ def handle_telegram_message(data):
     if not chat_id or not text:
         return
 
-    if text.startswith('/start'):
-        send_telegram_message(chat_id, "Привет! Введите ваш номер телефона в формате +996XXXXXXXXX для привязки.")
+    # Обработка команды /start с номером телефона (глубокая ссылка)
+    if text.startswith('/start phone_'):
+        # Извлекаем номер: /start phone_+996700123456
+        phone = text.replace('/start phone_', '').strip()
+        try:
+            profile = ParticipantProfile.objects.get(phone=phone)
+            profile.telegram_chat_id = str(chat_id)
+            profile.save()
+            send_telegram_message(chat_id, f"✅ Ваш номер {phone} успешно привязан! Теперь вернитесь в приложение и введите код.")
+        except ParticipantProfile.DoesNotExist:
+            send_telegram_message(chat_id, f"❌ Номер {phone} не найден в системе. Сначала зарегистрируйтесь в приложении.")
         return
 
-    # Если пользователь ввёл номер телефона
-    if text.startswith('+996') and len(text) >= 12:
+    # Обычный /start (без номера)
+    if text.startswith('/start'):
+        send_telegram_message(chat_id, "Привет! Для привязки номера откройте приложение и нажмите кнопку «Привязать Telegram», либо введите номер вручную в формате +996XXXXXXXXX.")
+        return
+
+    # Если пользователь вводит номер вручную (для отладки)
+    if re.match(r'^\+996\d{9}$', text):
         phone = text.strip()
         try:
             profile = ParticipantProfile.objects.get(phone=phone)
             profile.telegram_chat_id = str(chat_id)
             profile.save()
-            send_telegram_message(chat_id, f"✅ Ваш номер {phone} успешно привязан! Теперь вы будете получать коды подтверждения в Telegram.")
+            send_telegram_message(chat_id, f"✅ Ваш номер {phone} успешно привязан! Теперь войдите в приложение.")
         except ParticipantProfile.DoesNotExist:
             send_telegram_message(chat_id, f"❌ Номер {phone} не найден в системе. Сначала зарегистрируйтесь в приложении.")
         return
 
-    send_telegram_message(chat_id, "❌ Я не понял. Для привязки номера отправьте /start, затем введите номер телефона в формате +996XXXXXXXXX.")
+    # Любое другое сообщение
+    send_telegram_message(chat_id, "Для привязки номера используйте кнопку в приложении или введите номер в формате +996XXXXXXXXX.")
