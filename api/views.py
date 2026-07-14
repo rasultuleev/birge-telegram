@@ -10,59 +10,85 @@ from django.db.models import Sum
 from io import BytesIO
 import qrcode
 import random
+import json
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
 from .models import (
     VerificationCode, ParticipantProfile, Skill, Event,
     Participation, ParticipantSkill
 )
 from .tasks import send_telegram_code
+from .telegram_bot import handle_telegram_message
 
+# ---------- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ НОРМАЛИЗАЦИИ НОМЕРА ----------
+def normalize_phone(phone):
+    """Приводит номер телефона к формату +996XXXXXXXXX"""
+    if not phone:
+        return ''
+    phone = str(phone).strip()
+    # Удаляем пробелы, дефисы, скобки
+    phone = phone.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')
+    # Если номер не начинается с +, добавляем +
+    if not phone.startswith('+'):
+        phone = '+' + phone
+    return phone
+
+# ---------- CORS ----------
 def add_cors_headers(response):
     response['Access-Control-Allow-Origin'] = '*'
     response['Access-Control-Allow-Methods'] = 'GET, POST, PUT, OPTIONS'
     response['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
     return response
 
+# ---------- HEALTH CHECK ----------
 @api_view(['GET'])
 def health_check(request):
     return add_cors_headers(Response({'status': 'ok', 'message': 'Birge API работает'}))
 
+# ---------- ОТПРАВКА КОДА ----------
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def send_verification_code(request):
-    phone = request.data.get('phone')
-    if not phone:
+    raw_phone = request.data.get('phone', '').strip()
+    if not raw_phone:
         return add_cors_headers(Response({'error': 'Телефон обязателен'}, status=400))
-    # Проверяем, есть ли пользователь с таким телефоном
-    try:
-        profile = ParticipantProfile.objects.get(phone=phone)
-        chat_id = profile.telegram_chat_id
-    except ParticipantProfile.DoesNotExist:
-        # Если профиля нет, мы его создадим позже при верификации кода
-        chat_id = None
 
+    phone = normalize_phone(raw_phone)
     code = f"{random.randint(100000, 999999)}"
     VerificationCode.objects.create(phone=phone, code=code)
     print(f"📧 Код для {phone}: {code}")
 
-    # Если есть chat_id, отправляем в Telegram
-    if chat_id:
-        send_telegram_code.delay(chat_id, code)
+    # Отправляем в Telegram, если есть chat_id
+    try:
+        profile = ParticipantProfile.objects.get(phone=phone)
+        if profile.telegram_chat_id:
+            send_telegram_code.delay(profile.telegram_chat_id, code)
+    except ParticipantProfile.DoesNotExist:
+        pass  # Профиль ещё не создан
 
     return add_cors_headers(Response({'message': 'Код отправлен (в Telegram, если привязан)'}))
 
+# ---------- ВЕРИФИКАЦИЯ КОДА ----------
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def verify_code(request):
-    phone = request.data.get('phone')
-    code = request.data.get('code')
+    raw_phone = request.data.get('phone', '').strip()
+    code = request.data.get('code', '').strip()
+    if not raw_phone or not code:
+        return add_cors_headers(Response({'error': 'Телефон и код обязательны'}, status=400))
+
+    phone = normalize_phone(raw_phone)
+
     try:
         verification = VerificationCode.objects.filter(
             phone=phone, code=code, is_used=False
         ).latest('created_at')
     except VerificationCode.DoesNotExist:
         return add_cors_headers(Response({'error': 'Неверный или просроченный код'}, status=400))
+
     if verification.is_expired():
         return add_cors_headers(Response({'error': 'Код истёк'}, status=400))
+
     verification.is_used = True
     verification.save()
 
@@ -71,12 +97,8 @@ def verify_code(request):
     if created:
         user.set_unusable_password()
         user.save()
+
     profile, _ = ParticipantProfile.objects.get_or_create(user=user, defaults={'phone': phone})
-    # Если пришёл telegram_chat_id, обновляем (если пользователь привязал бота)
-    tg_chat_id = request.data.get('telegram_chat_id')
-    if tg_chat_id:
-        profile.telegram_chat_id = tg_chat_id
-        profile.save()
 
     refresh = RefreshToken.for_user(user)
     return add_cors_headers(Response({
@@ -85,6 +107,7 @@ def verify_code(request):
         'refresh_token': str(refresh),
     }))
 
+# ---------- ПРОФИЛЬ ----------
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def get_profile(request):
@@ -124,18 +147,19 @@ def update_profile(request):
         profile.institution = data['institution']
     if 'group_name' in data:
         profile.group_name = data['group_name']
-    # Обновление chat_id, если пришло
     if 'telegram_chat_id' in data:
         profile.telegram_chat_id = data['telegram_chat_id']
     profile.save()
     return add_cors_headers(Response({'message': 'Профиль обновлён'}))
 
+# ---------- НАВЫКИ ----------
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def skill_list(request):
     skills = Skill.objects.all()
     return add_cors_headers(Response([{'id': s.id, 'name': s.name, 'category': s.category} for s in skills]))
 
+# ---------- ОРГАНИЗАТОР: СОЗДАНИЕ МЕРОПРИЯТИЯ ----------
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def create_event(request):
@@ -247,12 +271,8 @@ def register_event_by_code(request):
     if not created:
         return add_cors_headers(Response({'error': 'Вы уже зарегистрированы'}, status=400))
     return add_cors_headers(Response({'message': 'Регистрация успешна. Ожидайте подтверждения.'}))
-import json
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-from .models import ParticipantProfile
-from .telegram_bot import send_telegram_message, handle_telegram_message
 
+# ---------- WEBHOOK ДЛЯ TELEGRAM ----------
 @csrf_exempt
 def telegram_webhook(request):
     if request.method == 'POST':
