@@ -5,6 +5,7 @@ import {
   Alert, ActivityIndicator, Linking, Platform
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+const storage = typeof window !== 'undefined' ? localStorage : AsyncStorage;
 import { Camera, CameraView } from 'expo-camera';
 import QRCode from 'react-native-qrcode-svg';
 import WebQrScanner from './components/WebQrScanner';
@@ -64,19 +65,19 @@ export default function App() {
   // ---------- ТОКЕН ----------
   const saveToken = async (t) => {
     try {
-      await AsyncStorage.setItem('userToken', t);
+      await storage.setItem('userToken', t);
     } catch (e) { console.log('Ошибка сохранения токена:', e); }
   };
 
   const loadToken = async () => {
     try {
-      return await AsyncStorage.getItem('userToken');
+      return await storage.getItem('userToken');
     } catch (e) { console.log('Ошибка загрузки токена:', e); return null; }
   };
 
   const removeToken = async () => {
     try {
-      await AsyncStorage.removeItem('userToken');
+      await storage.removeItem('userToken');
     } catch (e) { console.log('Ошибка удаления токена:', e); }
   };
 
