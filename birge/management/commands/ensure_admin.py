@@ -8,10 +8,10 @@ class Command(BaseCommand):
     help = 'Создаёт суперпользователя и назначает is_staff для организаторов'
 
     def handle(self, *args, **options):
-        # Создание суперпользователя
+        # Суперпользователь
         admin_username = 'admin'
         admin_email = 'admin@example.com'
-        admin_password = 'admin123'  # Смените при необходимости
+        admin_password = 'admin123'
 
         if not User.objects.filter(username=admin_username).exists():
             User.objects.create_superuser(
@@ -25,7 +25,7 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.WARNING('Суперпользователь уже существует'))
 
-        # Назначаем права организатора для ролей organization и university (через профиль)
+        # Назначение is_staff для ролей organization и university
         try:
             Profile = apps.get_model('birge', 'Profile')
             profiles = Profile.objects.filter(user_type__in=['organization', 'university'])
@@ -36,18 +36,18 @@ class Command(BaseCommand):
                     user.is_staff = True
                     user.save()
                     count += 1
-            self.stdout.write(self.style.SUCCESS(f'Назначено is_staff для {count} пользователей через профиль'))
+            self.stdout.write(self.style.SUCCESS(f'Назначено is_staff для {count} пользователей'))
         except LookupError:
-            self.stdout.write(self.style.ERROR('Модель Profile не найдена, пропускаем'))
+            self.stdout.write(self.style.ERROR('Модель Profile не найдена'))
 
-        # Прямое назначение для вашего номера телефона (гарантия)
+        # Принудительно для вашего номера телефона
         phone_number = '+996700232888'
         try:
             user = User.objects.get(phone=phone_number)
             if not user.is_staff:
                 user.is_staff = True
                 user.save()
-                self.stdout.write(self.style.SUCCESS(f'Пользователю {phone_number} принудительно назначен is_staff'))
+                self.stdout.write(self.style.SUCCESS(f'Пользователю {phone_number} назначен is_staff'))
             else:
                 self.stdout.write(self.style.WARNING(f'Пользователь {phone_number} уже организатор'))
         except User.DoesNotExist:
