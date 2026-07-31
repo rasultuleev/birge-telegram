@@ -27,9 +27,9 @@ if not User.objects.filter(username=admin_username).exists():
 else:
     print(f'Суперпользователь {admin_username} уже существует')
 
-# Назначаем is_staff для ролей organization/university через ParticipantProfile
+# Назначаем is_staff для ролей organization/university через ParticipantProfile (приложение api)
 try:
-    Profile = apps.get_model('birge', 'ParticipantProfile')
+    Profile = apps.get_model('api', 'ParticipantProfile')
     profiles = Profile.objects.filter(user_type__in=['organization', 'university'])
     count = 0
     for profile in profiles:
@@ -40,7 +40,7 @@ try:
             count += 1
     print(f'Назначено is_staff для {count} пользователей через ParticipantProfile')
 except LookupError:
-    print('Модель ParticipantProfile не найдена (проверьте название приложения и модели)')
+    print('Модель api.ParticipantProfile не найдена')
 except Exception as e:
     print(f'Ошибка при работе с ParticipantProfile: {e}')
 
