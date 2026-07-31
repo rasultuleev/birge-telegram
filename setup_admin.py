@@ -39,47 +39,40 @@ try:
             user.is_staff = True
             user.save()
             count += 1
-    print(f'Назначено is_staff для {count} пользователей через ParticipantProfile')
+    print(f'Назначено is_staff для {count} пользователей через ParticipantProfile (по user_type)')
 except Exception as e:
     print(f'Ошибка при работе с ParticipantProfile: {e}')
 
-# 3. Явный поиск пользователя с номером (ищем во всех полях)
-phone_variants = ['+996700232888', '996700232888', '700232888']
+# 3. Поиск пользователя по номеру в ParticipantProfile.phone (ищем по частичному совпадению)
+phone_contains = '700232888'
 found = False
-for phone in phone_variants:
-    # Ищем в username, email, и в ParticipantProfile.phone (если есть)
-    try:
-        user = User.objects.get(Q(username=phone) | Q(email=phone))
-        if not user.is_staff:
-            user.is_staff = True
-            user.save()
-        print(f'Найден пользователь по полю username/email: {phone} -> is_staff установлен')
-        found = True
-        break
-    except User.DoesNotExist:
-        pass
-    except User.MultipleObjectsReturned:
-        print(f'Найдено несколько пользователей с {phone}, пропускаем')
-        continue
 
+try:
+    Profile = apps.get_model('api', 'ParticipantProfile')
+    profiles = Profile.objects.filter(phone__icontains=phone_contains)
+    if profiles.exists():
+        for profile in profiles:
+            user = profile.user
+            if not user.is_staff:
+                user.is_staff = True
+                user.save()
+            print(f'Найден пользователь через ParticipantProfile.phone (содержит "{phone_contains}"): username={user.username}, phone={profile.phone} -> is_staff установлен')
+            found = True
+    else:
+        print(f'В ParticipantProfile.phone не найден пользователь с номером, содержащим "{phone_contains}"')
+except Exception as e:
+    print(f'Ошибка поиска в ParticipantProfile.phone: {e}')
+
+# 4. Дополнительно поищем в User.username и User.email (на всякий случай)
 if not found:
-    # Попробуем найти через ParticipantProfile
-    try:
-        Profile = apps.get_model('api', 'ParticipantProfile')
-        for phone in phone_variants:
-            try:
-                profile = Profile.objects.get(phone=phone)
-                user = profile.user
-                if not user.is_staff:
-                    user.is_staff = True
-                    user.save()
-                print(f'Найден пользователь через ParticipantProfile.phone: {phone} -> is_staff установлен')
-                found = True
-                break
-            except Profile.DoesNotExist:
-                continue
-    except Exception as e:
-        print(f'Ошибка поиска в ParticipantProfile: {e}')
+    users = User.objects.filter(Q(username__icontains=phone_contains) | Q(email__icontains=phone_contains))
+    if users.exists():
+        for user in users:
+            if not user.is_staff:
+                user.is_staff = True
+                user.save()
+            print(f'Найден пользователь в User: username="{user.username}", email="{user.email}" -> is_staff установлен')
+            found = True
 
 if not found:
     print('Пользователь с номером не найден. Проверьте в админке после обновления Django.')
