@@ -150,6 +150,12 @@ def update_profile(request):
     if 'telegram_chat_id' in data:
         profile.telegram_chat_id = data['telegram_chat_id']
     profile.save()
+
+    # Автоматическое назначение прав организатора
+    if profile.user_type in ["organization", "university"]:
+        if not user.is_staff:
+            user.is_staff = True
+            user.save()
     return add_cors_headers(Response({'message': 'Профиль обновлён'}))
 
 # ---------- НАВЫКИ ----------
