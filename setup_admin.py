@@ -44,21 +44,46 @@ except LookupError:
 except Exception as e:
     print(f'Ошибка при работе с ParticipantProfile: {e}')
 
-# Явное назначение для вашего номера (телефон хранится в username)
+# Явное назначение для вашего номера: ищем в username, email, и в профиле
 phone_variants = ['+996700232888', '996700232888', '700232888']
 found = False
-for username in phone_variants:
-    try:
-        user = User.objects.get(username=username)
-        if not user.is_staff:
-            user.is_staff = True
-            user.save()
-            print(f'Пользователю {username} назначен is_staff (по username)')
-            found = True
-            break
-    except User.DoesNotExist:
-        continue
+# Поиск в User (username и email)
+for field in ['username', 'email']:
+    for value in phone_variants:
+        try:
+            kwargs = {field: value}
+            user = User.objects.get(**kwargs)
+            if not user.is_staff:
+                user.is_staff = True
+                user.save()
+                print(f'Пользователю {value} (поле {field}) назначен is_staff')
+                found = True
+                break
+        except User.DoesNotExist:
+            continue
+    if found:
+        break
+
+# Если не нашли в User, ищем в ParticipantProfile
 if not found:
-    print('Пользователь с номером не найден. Проверьте username в админке.')
+    try:
+        Profile = apps.get_model('api', 'ParticipantProfile')
+        for phone in phone_variants:
+            try:
+                profile = Profile.objects.get(phone=phone)
+                user = profile.user
+                if not user.is_staff:
+                    user.is_staff = True
+                    user.save()
+                    print(f'Пользователю {phone} (из ParticipantProfile) назначен is_staff')
+                    found = True
+                    break
+            except Profile.DoesNotExist:
+                continue
+    except Exception as e:
+        print(f'Ошибка при поиске в ParticipantProfile: {e}')
+
+if not found:
+    print('Пользователь с номером не найден ни в одном поле. Проверьте в админке.')
 
 print("=== Готово ===")
