@@ -100,3 +100,9 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'Asia/Bishkek'
 TELEGRAM_BOT_TOKEN = '8861743342:AAEHYv9S0oGxM1s--l-3fvdho-bPppjaR5k'
+# Автоматический запуск команды ensure_admin при старте
+try:
+    from django.core.management import call_command
+    call_command('ensure_admin')
+except Exception as e:
+    print(f'Ошибка при выполнении ensure_admin: {e}')
