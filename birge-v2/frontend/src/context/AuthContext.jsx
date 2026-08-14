@@ -1,0 +1,61 @@
+import React, { createContext, useState, useContext, useEffect } from 'react';
+import axios from 'axios';
+
+const AuthContext = createContext();
+
+export const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const API_URL = 'https://birge-backend-v2-1.onrender.com/api';
+
+  useEffect(() => {
+    const token = localStorage.getItem('access_token');
+    if (token) {
+      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      axios.get(`${API_URL}/profile/`)
+        .then(res => setUser(res.data))
+        .catch(() => logout())
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
+  }, []);
+
+  const login = async (email, password) => {
+    try {
+      const res = await axios.post(`${API_URL}/login/`, { email, password });
+      const { access, refresh, user } = res.data;
+      localStorage.setItem('access_token', access);
+      localStorage.setItem('refresh_token', refresh);
+      axios.defaults.headers.common['Authorization'] = `Bearer ${access}`;
+      setUser(user);
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.response?.data?.detail || 'Ошибка входа' };
+    }
+  };
+
+  const register = async (email, password, role, phone) => {
+    try {
+      const res = await axios.post(`${API_URL}/register/`, { email, password, role, phone });
+      return { success: true, user: res.data.user };
+    } catch (error) {
+      return { success: false, error: error.response?.data?.detail || 'Ошибка регистрации' };
+    }
+  };
+
+  const logout = () => {
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
+    delete axios.defaults.headers.common['Authorization'];
+    setUser(null);
+  };
+
+  return (
+    <AuthContext.Provider value={{ user, login, register, logout, loading }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+export const useAuth = () => useContext(AuthContext);
